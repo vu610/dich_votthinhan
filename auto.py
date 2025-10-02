@@ -12,8 +12,6 @@ INPUT_FOLDER = "truyen"
 OUTPUT_FOLDER = "dich_votthinhan"
 PROMPT_FILE = "system_prompt.md"
 GLOSSARY_FILE = "character_glossary.md"
-
-# 2. URL VÀ SELECTORS
 WEBSITE_URL = "https://aistudio.google.com/prompts/new_chat"
 TEXT_INPUT_SELECTOR = 'textarea[aria-label="Type something or tab to choose an example prompt"], textarea[aria-label="Start typing a prompt"]'
 RESPONSE_TURN_SELECTOR = "ms-chat-turn"
@@ -23,14 +21,42 @@ NEW_CHAT_BUTTON_SELECTOR = "button[aria-label='New chat']"
 STOP_BUTTON_SELECTOR = "button:has-text('Stop')"
 SYSTEM_INSTRUCTIONS_BUTTON_SELECTOR = "button[aria-label='System instructions']"
 SYSTEM_INSTRUCTIONS_TEXTAREA_SELECTOR = 'textarea[placeholder*="Optional tone and style instructions"]'
-
-# 3. CẤU HÌNH KHÁC
 CHAPTERS_PER_CHAT = 4
-# >> CẤU HÌNH MỚI: Số lần thử lại tối đa cho mỗi chương <<
 MAX_RETRIES = 3
 # ====================================================================================
 
+# >> HÀM MỚI: Chờ nội dung ổn định <<
+def get_stable_response_text(page, timeout=5000):
+    """
+    Chờ và lấy text từ lượt chat cuối cùng sau khi nội dung đã ổn định.
+    timeout: thời gian tối đa để chờ (miliseconds).
+    """
+    print("    - Đang chờ nội dung phản hồi ổn định...")
+    all_turns = page.locator(RESPONSE_TURN_SELECTOR).all()
+    if not all_turns:
+        print("    - Lỗi: Không tìm thấy lượt chat nào.")
+        return None
+    
+    last_turn = all_turns[-1]
+    content_container = last_turn.locator(RESPONSE_CONTENT_SELECTOR)
+    if content_container.count() == 0:
+        print(f"    - Lỗi: Không tìm thấy 'hộp chứa text' ({RESPONSE_CONTENT_SELECTOR}).")
+        return None
+        
+    previous_text = ""
+    start_time = time.time()
+    while (time.time() - start_time) * 1000 < timeout:
+        current_text = content_container.inner_text()
+        if current_text == previous_text and current_text != "":
+            print("    - Nội dung đã ổn định. Lấy kết quả.")
+            return current_text
+        previous_text = current_text
+        time.sleep(0.5) # Chờ nửa giây giữa các lần kiểm tra
+    
+    print("    - Cảnh báo: Hết thời gian chờ ổn định. Lấy nội dung cuối cùng.")
+    return previous_text
 
+# (Các hàm load_and_assemble_prompt, update_system_instructions, extract_and_process_updates giữ nguyên)
 def load_and_assemble_prompt():
     """Đọc prompt và glossary từ file, sau đó ghép chúng lại."""
     try:
@@ -42,7 +68,6 @@ def load_and_assemble_prompt():
     except FileNotFoundError as e:
         print(f"[X] Lỗi: Không tìm thấy file prompt hoặc glossary: {e}")
         return None
-
 
 def update_system_instructions(page, full_prompt):
     """Hàm chung để mở, điền và đóng System Instructions."""
@@ -61,7 +86,6 @@ def update_system_instructions(page, full_prompt):
         print(f"    - Lỗi khi đồng bộ hóa System Instructions. Bỏ qua. Lỗi: {e}")
         page.keyboard.press("Escape")
 
-
 def extract_and_process_updates(response_text):
     """
     Tách phần truyện dịch và phần cập nhật glossary.
@@ -69,6 +93,8 @@ def extract_and_process_updates(response_text):
     """
     update_marker = "[UPDATE_GLOSSARY]"
     update_occurred = False
+    if response_text is None:
+        return "", update_occurred
     
     if update_marker in response_text:
         parts = response_text.split(update_marker, 1)
@@ -108,7 +134,7 @@ def extract_and_process_updates(response_text):
     else:
         return response_text.strip(), update_occurred
 
-
+# >> Hàm process_single_file đã được cập nhật <<
 def process_single_file(page, input_path, output_path):
     filename = os.path.basename(input_path)
     print(f"\n[*] Bắt đầu xử lý file: {filename}")
@@ -123,22 +149,19 @@ def process_single_file(page, input_path, output_path):
         print("    - Đang chờ AI phản hồi (chờ nút 'Stop' biến mất)...")
         page.locator(STOP_BUTTON_SELECTOR).wait_for(state="hidden", timeout=300000)
         print("    - AI đã phản hồi xong.")
-        time.sleep(2) 
-
-        all_turns = page.locator(RESPONSE_TURN_SELECTOR).all()
-        if not all_turns: return False, False
         
-        last_turn = all_turns[-1]
-        content_container = last_turn.locator(RESPONSE_CONTENT_SELECTOR)
-        if content_container.count() == 0: return False, False
-            
-        full_response_text = content_container.inner_text()
+        # >> THAY ĐỔI LỚN NHẤT: Gọi hàm chờ ổn định <<
+        full_response_text = get_stable_response_text(page)
+        
+        if full_response_text is None or full_response_text == "":
+            print("[X] Lỗi: Không thể lấy được nội dung phản hồi sau khi chờ.")
+            return False, False
+
         final_text, glossary_updated = extract_and_process_updates(full_response_text)
         
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(final_text)
         print(f"[✔] Đã dịch và lưu thành công: {output_path}")
-        # Trả về (Thành công, Có cập nhật glossary không)
         return True, glossary_updated
     except TimeoutError:
         print(f"[X] Lỗi: Hết thời gian chờ phản hồi cho file {filename}.")
@@ -148,6 +171,7 @@ def process_single_file(page, input_path, output_path):
         return False, False
 
 
+# (Hàm main giữ nguyên như phiên bản trước)
 def main():
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
     
@@ -204,7 +228,6 @@ def main():
             input_path = os.path.join(INPUT_FOLDER, filename)
             output_path = os.path.join(OUTPUT_FOLDER, filename)
 
-            # >> LOGIC THỬ LẠI VÀ BỎ QUA <<
             success = False
             retry_count = 0
             while not success and retry_count < MAX_RETRIES:
@@ -226,7 +249,6 @@ def main():
                 if not success:
                     retry_count += 1
             
-            # Sau vòng lặp, kiểm tra kết quả
             if success:
                 chapters_in_current_chat += 1
                 print("    - Tạm nghỉ 10 giây...")
@@ -234,7 +256,6 @@ def main():
             else:
                 print(f"\n[X] LỖI NẶNG: Đã thử lại {MAX_RETRIES} lần nhưng vẫn thất bại với file '{filename}'.")
                 print("    -> Bỏ qua chương này và chuyển sang chương tiếp theo.")
-                # Vòng lặp for sẽ tự động chuyển sang file tiếp theo
 
         print("\n================ HOÀN TẤT ==================")
         print("Script đã xử lý xong. Bạn có thể đóng terminal này.")
