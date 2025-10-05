@@ -65,3 +65,15 @@
 | 盛老頭 (Shèng lǎotóu) | N/A | **Lão họ Thịnh** | Lão ông vốn là người hầu của nhà họ Liễu. |
 | 馬一鳴 (Mǎ Yīmíng) | N/A | **Mã Nhất Minh** | Phó tổ trưởng đội khảo sát. |
 | 馮志高 (Féng Zhìgāo) | N/A | **Phùng Chí Cao** | Tên của người mất tích. |
+| 陰萌 | Yīn Méng | **Âm Manh** | Cô gái đến từ Phong Đô, gia đình làm quan tài. |
+| 山炮 | Shānpào | **Sơn Pháo** | Biệt danh của một người trong làng, bạn của Lý Tam Giang. |
+| 朱教授 | Zhū Jiàoshòu | **Giáo sư Chu** | Giáo sư cũ của Lý Truy Viễn ở Bắc Kinh. |
+| 張教授 | Zhāng Jiàoshòu | **Giáo sư Trương** | Giáo sư Lịch sử đã nghỉ hưu ở khu tập thể, được Lý Truy Viễn nhờ giải mã thẻ tre. |
+| **羅工** | Luó Gōng | **La công** | Kỹ sư La, người kể chuyện ở quán ăn đêm tại Vạn Châu. |
+| **羅廷銳** | Luó Tíngruì | **La Đình Nhuệ** | Tên đầy đủ của La công. |
+| **魏正道** | Wèi Zhèngdào | **Ngụy Chính Đạo** | Tác giả của các cuốn sách tâm linh, người bạn đã chết của thực thể dưới rừng đào. |
+| **婷侯** | Tíng Hóu | **Đình Hầu** | Tên thân mật của một người phụ nữ được Lý Tam Giang nhờ chuẩn bị đồ ăn cho Đàm Văn Bân. |
+| **蕭鶯鶯** | Xiāo Yīngyīng | **Tiêu Oanh Oanh** | Người làm công mới nhà Lý Tam Giang, được gọi là Oanh Hầu. |
+| **阿力** | Ā Lì | **A Lực** | Nhân vật được Lý Tam Giang nhắc đến khi đưa lì xì cho dì Lưu, có thể là Tần Lực (Chú Tần). |
+| **志華** | Zhìhuá | **Chí Hoa** | Cậu sinh viên trông coi cửa hàng bị Tuyết Lượng Lượng đuổi việc. |
+| **孫阿姨** | Sūn āyí | **Dì Tôn** | Người phụ nữ làm việc tại cửa hàng trong trường. |
