@@ -1,6 +1,7 @@
 # File: dich_truyen_final_v18.py
 # Phiên b?n s?a l?i logic c?p nh?t glossary, ??m b?o ??ng b? hóa nh?t quán.
 
+import argparse
 import os
 import re
 import time
@@ -21,8 +22,7 @@ from story_db import (
 )
 
 # ======================= CONFIG =======================
-INPUT_FOLDER = "truyen"
-OUTPUT_FOLDER = "dich_votthinhan"
+DEFAULT_ROOT_FOLDER = "truyen"
 SYSTEM_PROMPT_FILE = "system_prompt.md"
 WEBSITE_URL = "https://aistudio.google.com/prompts/new_chat"
 TEXT_INPUT_SELECTOR = 'textarea[aria-label="Type something or tab to choose an example prompt"], textarea[aria-label="Start typing a prompt"]'
@@ -41,6 +41,104 @@ STABILITY_TIMEOUT = 30
 ACTION_DELAY_SECONDS = 2
 DB_FILENAME = "story_data.sqlite"
 # ======================================================
+
+DEFAULT_PROFILE_PATHS = [
+    os.path.expanduser(f"~/chrome-for-automation{idx}") for idx in range(0, 6)
+]
+
+RATE_LIMIT_KEYWORDS = (
+    "you've reached your rate limit",
+    "you have reached your rate limit",
+    "rate limit",
+)
+
+
+class RateLimitError(RuntimeError):
+    """Được ném ra khi AI Studio báo đã chạm giới hạn tần suất."""
+
+
+class BrowserSessionManager:
+    """Quản lý vòng quay profile Chrome khi làm việc với Playwright."""
+
+    def __init__(
+        self,
+        playwright,
+        profile_paths: Sequence[str],
+        *,
+        channel: str = "chrome",
+        headless: bool = False,
+    ) -> None:
+        if not profile_paths:
+            raise ValueError("Cần ít nhất một profile Chrome để chạy tool.")
+        self._playwright = playwright
+        self._profile_paths = [os.path.expanduser(path) for path in profile_paths]
+        self._channel = channel
+        self._headless = headless
+        self._index = -1
+        self._context = None
+        self.page = None
+
+    def launch_initial(self, system_prompt: Optional[str]) -> None:
+        self._rotate_to(self._next_index(), system_prompt)
+
+    def rotate(self, system_prompt: Optional[str]) -> None:
+        print("\n[!] Phát hiện giới hạn tần suất. Đang chuyển sang profile Chrome kế tiếp...")
+        self._rotate_to(self._next_index(), system_prompt)
+
+    def close(self) -> None:
+        if self._context is not None:
+            try:
+                self._context.close()
+            except Exception as exc:  # noqa: BLE001
+                print(f"[!] Cảnh báo: lỗi khi đóng context trình duyệt: {exc}")
+        self._context = None
+        self.page = None
+
+    # --------------------------------------------------
+
+    def _next_index(self) -> int:
+        return (self._index + 1) % len(self._profile_paths)
+
+    def _rotate_to(self, index: int, system_prompt: Optional[str]) -> None:
+        self.close()
+        self._index = index
+        user_data_dir = self._profile_paths[self._index]
+        os.makedirs(user_data_dir, exist_ok=True)
+        print(f"[•] Đang khởi chạy Chrome profile: {user_data_dir}")
+        try:
+            self._context = self._playwright.chromium.launch_persistent_context(
+                user_data_dir=user_data_dir,
+                channel=self._channel,
+                headless=self._headless,
+                args=[
+                    "--no-sandbox",
+                    "--disable-extensions",
+                    "--disable-gpu",
+                    "--disable-dev-shm-usage",
+                ],
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                f"Không thể khởi chạy Chrome với profile '{user_data_dir}': {exc}"
+            ) from exc
+
+        if self._context.pages:
+            self.page = self._context.pages[0]
+        else:
+            self.page = self._context.new_page()
+
+        self.page.set_default_timeout(60000)
+        self.page.goto(WEBSITE_URL, wait_until="domcontentloaded")
+        wait_between_actions(note="Chờ trang AI Studio tải xong")
+        try:
+            self.page.wait_for_selector(TEXT_INPUT_SELECTOR, timeout=60000)
+            print("[✓] Đã truy cập AI Studio và sẵn sàng làm việc.")
+        except TimeoutError as exc:
+            raise RuntimeError("Không tìm thấy ô chat sau 60 giây.") from exc
+
+        print("[*] Đồng bộ System Instructions cho profile hiện tại...")
+        update_system_instructions(self.page, system_prompt)
+
 
 CHINESE_SEQUENCE_PATTERN = re.compile(
     r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002EBEF]+"
@@ -212,6 +310,19 @@ def wait_for_and_get_stable_text(page) -> Optional[str]:
     return previous_text
 
 
+def detect_rate_limit(page, response_text: Optional[str]) -> bool:
+    lowered_text = response_text.lower() if response_text else ""
+    if lowered_text and any(keyword in lowered_text for keyword in RATE_LIMIT_KEYWORDS):
+        return True
+    try:
+        locator = page.locator("text=/rate limit/i")
+        if locator.count() and locator.first.is_visible():
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
 def submit_prompt_and_get_response(page, prompt_text: str) -> Tuple[bool, Optional[str], bool]:
     try:
         page.wait_for_selector(TEXT_INPUT_SELECTOR, timeout=20000)
@@ -242,6 +353,9 @@ def submit_prompt_and_get_response(page, prompt_text: str) -> Tuple[bool, Option
         wait_between_actions(note="Ghi nhận trạng thái Content Blocked")
         return False, None, True
     full_response_text = wait_for_and_get_stable_text(page)
+    if detect_rate_limit(page, full_response_text):
+        print("    - [!] Hệ thống báo đã đạt giới hạn tần suất.")
+        raise RateLimitError("AI Studio trả về thông báo giới hạn tần suất.")
     if full_response_text is None or full_response_text == "":
         print("[X] Lỗi: Không thể lấy được nội dung phản hồi sau khi chờ.")
         return False, None, False
@@ -274,10 +388,31 @@ def run_initialisation(
             print(f"    -> Thử lại khởi tạo (lần {attempt}/{MAX_RETRIES})...")
             wait_between_actions(seconds=5, note="Nghỉ giữa các lần thử")
             print("    -> Tải lại trang để đảm bảo trạng thái sạch...")
-            page.reload(wait_until="domcontentloaded")
+            reload_success = False
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=90000)
+                reload_success = True
+            except (TimeoutError, Error) as exc:
+                print(f"    -> Cảnh báo: Reload thất bại ({exc}). Thử mở lại URL.")
+                try:
+                    page.goto(WEBSITE_URL, wait_until="domcontentloaded", timeout=120000)
+                    reload_success = True
+                    print("    -> Đã mở lại trang thành công sau lỗi reload.")
+                except (TimeoutError, Error) as goto_exc:
+                    print(f"    -> Lỗi: Không thể mở lại trang sau khi reload lỗi ({goto_exc}).")
+            if not reload_success:
+                if attempt == MAX_RETRIES:
+                    print("    -> Hết lượt thử reload trong giai đoạn khởi tạo. Dừng lại.")
+                    return False
+                wait_between_actions(seconds=5, note="Bỏ qua lần thử này vì reload thất bại")
+                continue
             wait_between_actions(seconds=5, note="Chờ trang tải lại hoàn tất")
             update_system_instructions(page, system_prompt)
-        success, response_text, blocked = submit_prompt_and_get_response(page, prompt)
+        try:
+            success, response_text, blocked = submit_prompt_and_get_response(page, prompt)
+        except RateLimitError:
+            print("    -> Tạm dừng khởi tạo do giới hạn tần suất.")
+            raise
         if blocked:
             print("    -> Nội dung bị chính sách an toàn chặn. Không thể khởi tạo.")
             return False
@@ -320,7 +455,24 @@ def process_translation_file(
             print(f"    -> Thử lại lần {attempt}/{MAX_RETRIES} cho file '{filename}'...")
             wait_between_actions(seconds=5, note="Nghỉ giữa các lần thử")
             print("    -> Tải lại trang để đảm bảo trạng thái sạch...")
-            page.reload(wait_until="domcontentloaded")
+            reload_success = False
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=90000)
+                reload_success = True
+            except (TimeoutError, Error) as exc:
+                print(f"    -> Cảnh báo: Reload thất bại ({exc}). Thử mở lại URL.")
+                try:
+                    page.goto(WEBSITE_URL, wait_until="domcontentloaded", timeout=120000)
+                    reload_success = True
+                    print("    -> Đã mở lại trang thành công sau lỗi reload.")
+                except (TimeoutError, Error) as goto_exc:
+                    print(f"    -> Lỗi: Không thể mở lại trang sau khi reload lỗi ({goto_exc}).")
+            if not reload_success:
+                if attempt == MAX_RETRIES:
+                    print("    -> Hết lượt thử reload trong quá trình dịch. Dừng xử lý chương này.")
+                    return False, False
+                wait_between_actions(seconds=5, note="Bỏ qua lần thử này vì reload thất bại")
+                continue
             wait_between_actions(seconds=5, note="Chờ trang tải lại hoàn tất")
             update_system_instructions(page, system_prompt)
         with connect(db_path) as conn:
@@ -333,7 +485,11 @@ def process_translation_file(
             relationships_section=relationships_section,
             source_text=chapter_text,
         )
-        success, response_text, blocked = submit_prompt_and_get_response(page, prompt)
+        try:
+            success, response_text, blocked = submit_prompt_and_get_response(page, prompt)
+        except RateLimitError:
+            print("    -> Dừng dịch tạm thời vì giới hạn tần suất.")
+            raise
         if blocked:
             print("    -> Nội dung bị chính sách an toàn chặn. Không thể tiếp tục với chương này.")
             return False, True
@@ -348,6 +504,33 @@ def process_translation_file(
             if attempt == MAX_RETRIES:
                 return False, False
             continue
+
+        # Kiểm tra số ký tự tiếng Trung trong bản dịch
+        chinese_chars = sum(len(seq) for seq in CHINESE_SEQUENCE_PATTERN.findall(translation_text))
+        if chinese_chars > 30:
+            print(f"    -> Phát hiện {chinese_chars} ký tự tiếng Trung (>30), tạo phiên chat mới và dịch lại...")
+            if not reset_chat_session(page, system_prompt):
+                print("    -> Không thể tạo phiên chat mới, bỏ qua retry.")
+            else:
+                # Dịch lại với cùng prompt
+                try:
+                    success_retry, response_text_retry, blocked_retry = submit_prompt_and_get_response(page, prompt)
+                except RateLimitError:
+                    print("    -> Retry bị dừng do giới hạn tần suất, giữ bản dịch gốc.")
+                    raise
+                if blocked_retry:
+                    print("    -> Retry bị chặn, giữ bản dịch gốc.")
+                elif success_retry and response_text_retry:
+                    try:
+                        translation_text, glossary_updates, relationship_updates = split_translation_and_updates(
+                            response_text_retry
+                        )
+                        print("    -> Đã retry thành công.")
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"    -> Lỗi parse retry: {exc}, giữ bản dịch gốc.")
+                else:
+                    print("    -> Retry thất bại, giữ bản dịch gốc.")
+
         glossary_added = 0
         relationships_added = 0
         if glossary_updates or relationship_updates:
@@ -362,7 +545,11 @@ def process_translation_file(
                 f"    - Cập nhật database: +{glossary_added} nhân vật, +{relationships_added} quan hệ."
             )
         # Sửa ký tự tiếng Trung nếu có
-        translation_text = fix_chinese_in_translation(page, translation_text)
+        try:
+            translation_text = fix_chinese_in_translation(page, translation_text)
+        except RateLimitError:
+            print("    -> Dừng xử lý bản dịch do giới hạn tần suất trong bước làm sạch tiếng Trung.")
+            raise
         try:
             with open(output_path, "w", encoding="utf-8") as out_handle:
                 out_handle.write(translation_text)
@@ -455,7 +642,11 @@ def fix_chinese_in_translation(page, translation_text: str) -> str:
         prompt_sequences = "\n".join(pending_sequences)
         prompt = f"{prompt_header}{prompt_rules}\n\nCÁC CỤM CẦN DỊCH:\n{prompt_sequences}"
 
-        success, response_text, blocked = submit_prompt_and_get_response(page, prompt)
+        try:
+            success, response_text, blocked = submit_prompt_and_get_response(page, prompt)
+        except RateLimitError:
+            print("    -> Bị giới hạn tần suất khi yêu cầu AI sửa chuỗi tiếng Trung.")
+            raise
         if blocked or not success or not response_text:
             print("    -> Không thể gọi AI để sửa chuỗi tiếng Trung. Giữ nguyên bản dịch hiện tại.")
             return cleaned_text
@@ -510,96 +701,200 @@ def cleanup_database(db_path: str) -> Tuple[int, int]:
     return removed
 
 
-def main():
-    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-    system_prompt = load_system_prompt()
-    db_path = os.path.join(INPUT_FOLDER, DB_FILENAME)
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Tool dịch truyện tự động với AI Studio.")
+    parser.add_argument(
+        "--root",
+        default=DEFAULT_ROOT_FOLDER,
+        help="Thư mục gốc chứa các bộ truyện (mặc định: ./truyen)",
+    )
+    parser.add_argument(
+        "--profiles",
+        help=(
+            "Danh sách profile Chrome (phân tách bởi dấu phẩy). "
+            "Nếu không truyền, tool dùng ~/chrome-for-automation1..5."
+        ),
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Chạy Chrome ở chế độ headless (ít được khuyến nghị).",
+    )
+    return parser.parse_args()
+
+
+def resolve_profile_paths(args: argparse.Namespace) -> List[str]:
+    if args.profiles:
+        profiles = [path.strip() for path in args.profiles.split(",") if path.strip()]
+    else:
+        profiles = DEFAULT_PROFILE_PATHS
+    unique_profiles: List[str] = []
+    seen = set()
+    for path in profiles:
+        if path not in seen:
+            unique_profiles.append(path)
+            seen.add(path)
+    return unique_profiles
+
+
+def iter_novel_directories(root_folder: str) -> List[str]:
+    if not os.path.isdir(root_folder):
+        return []
+    entries = []
+    for name in sorted(os.listdir(root_folder)):
+        candidate = os.path.join(root_folder, name)
+        if os.path.isdir(candidate):
+            entries.append(candidate)
+    return entries
+
+
+def process_novel(
+    session_manager: BrowserSessionManager,
+    novel_root: str,
+    system_prompt: Optional[str],
+) -> None:
+    novel_name = os.path.basename(os.path.abspath(novel_root))
+    input_folder = os.path.join(novel_root, "goc")
+    output_folder = os.path.join(novel_root, "dich")
+    db_path = os.path.join(novel_root, DB_FILENAME)
+
+    if not os.path.isdir(input_folder):
+        print(f"[-] Bỏ qua '{novel_name}': không tìm thấy thư mục 'goc'.")
+        return
+
+    os.makedirs(output_folder, exist_ok=True)
     removed_glossary, removed_relationships = cleanup_database(db_path)
     if removed_glossary or removed_relationships:
         print(
-            f"[!] Đã dọn dẹp database: xoá {removed_glossary} nhân vật placeholder, "
+            f"[!] '{novel_name}': dọn database - xoá {removed_glossary} nhân vật placeholder, "
             f"{removed_relationships} quan hệ placeholder."
         )
-    with sync_playwright() as playwright:
-        try:
-            browser = playwright.chromium.connect_over_cdp("http://localhost:9222")
-            if not browser.contexts:
-                print("[X] Lỗi: Không tìm thấy context trình duyệt nào đang mở.")
-                return
-            context = browser.contexts[0]
-            if not context.pages:
-                print("[X] Lỗi: Không tìm thấy tab trình duyệt nào đang mở.")
-                return
-            page = context.pages[0]
-            print("[✓] Kết nối thành công!")
-        except Error as exc:
-            print(
-                f"\n[X] LỖI: KHÔNG THỂ KẾT NỐI VỚI TRÌNH DUYỆT.\n    Lỗi: {exc}"
-            )
-            return
 
-        page.goto(WEBSITE_URL)
-        wait_between_actions(note="Chờ trang AI Studio tải xong")
-        try:
-            page.wait_for_selector(TEXT_INPUT_SELECTOR, timeout=60000)
-            print("[✓] Đã vào trang AI Studio và sẵn sàng hoạt động!")
-        except TimeoutError:
-            print("[X] Lỗi: Không tìm thấy ô chat sau 60 giây.")
-            return
+    chapter_files = [
+        name
+        for name in sorted(os.listdir(input_folder))
+        if name.endswith(".txt")
+    ]
+    if not chapter_files:
+        print(f"[-] '{novel_name}': không tìm thấy chương .txt trong thư mục 'goc'.")
+        return
 
-        print("\n[*] Thiết lập prompt ban đầu cho phiên làm việc...")
-        update_system_instructions(page, system_prompt)
+    translated_files = {
+        name for name in os.listdir(output_folder) if name.endswith(".txt")
+    }
 
-        files = sorted(
-            filename for filename in os.listdir(INPUT_FOLDER) if filename.endswith(".txt")
-        )
-        translated_files = set(os.listdir(OUTPUT_FOLDER))
+    page = session_manager.page
 
-        if files and not os.path.exists(db_path):
-            initial_paths = [
-                os.path.join(INPUT_FOLDER, name)
-                for name in files[:3]
-                if name.endswith(".txt")
-            ]
-            if run_initialisation(page, db_path, initial_paths, system_prompt):
+    if chapter_files and not os.path.exists(db_path):
+        initial_paths = [
+            os.path.join(input_folder, name)
+            for name in chapter_files[:3]
+        ]
+        while True:
+            try:
+                initialised = run_initialisation(page, db_path, initial_paths, system_prompt)
+            except RateLimitError:
+                session_manager.rotate(system_prompt)
+                page = session_manager.page
+                continue
+            if initialised:
                 wait_between_actions(seconds=5, note="Chuẩn bị dịch sau khi khởi tạo")
                 if not reset_chat_session(page, system_prompt):
-                    print("[X] Lỗi: Không thể tạo cuộc trò chuyện mới sau khởi tạo. Dừng script.")
+                    print(f"[X] '{novel_name}': không thể tạo chat mới sau khởi tạo. Dừng bộ truyện này.")
                     return
-                wait_between_actions(seconds=4, note="Sẵn sàng bắt đầu dịch chương đầu tiên")
+                wait_between_actions(seconds=4, note="Sẵn sàng dịch chương đầu tiên")
             else:
-                print("[X] Không thể khởi tạo database. Dừng script.")
+                print(f"[X] '{novel_name}': khởi tạo database thất bại. Bỏ qua bộ truyện.")
                 return
+            break
 
-        for filename in files:
-            if filename in translated_files:
-                print(f"[-] Bỏ qua: '{filename}' đã được dịch.")
+    print("\n" + "=" * 64)
+    print(f"[☆] BẮT ĐẦU DỊCH BỘ TRUYỆN: {novel_name}")
+    print("=" * 64)
+
+    for filename in chapter_files:
+        if filename in translated_files:
+            print(f"[-] '{novel_name}': bỏ qua '{filename}' vì đã có bản dịch.")
+            continue
+
+        input_path = os.path.join(input_folder, filename)
+        output_path = os.path.join(output_folder, filename)
+
+        while True:
+            try:
+                success, blocked = process_translation_file(
+                    page, db_path, input_path, output_path, system_prompt
+                )
+            except RateLimitError:
+                session_manager.rotate(system_prompt)
+                page = session_manager.page
                 continue
+            break
 
-            input_path = os.path.join(INPUT_FOLDER, filename)
-            output_path = os.path.join(OUTPUT_FOLDER, filename)
-            success, blocked = process_translation_file(
-                page, db_path, input_path, output_path, system_prompt
-            )
-            if success:
-                translated_files.add(filename)
-                wait_between_actions(seconds=10, note="Nghỉ trước khi chuyển sang chương tiếp theo")
+        if success:
+            translated_files.add(filename)
+            wait_between_actions(seconds=10, note="Nghỉ trước khi sang chương tiếp theo")
+        else:
+            if blocked:
+                wait_between_actions(seconds=5, note="Tạm nghỉ sau khi dính Content Blocked")
             else:
-                if blocked:
-                    wait_between_actions(seconds=5, note="Chờ cuộc trò chuyện sẵn sàng sau Content Blocked")
-                else:
-                    wait_between_actions(seconds=5, note="Chuẩn bị cho chương tiếp theo")
+                wait_between_actions(seconds=5, note="Chuẩn bị thử chương tiếp theo")
 
-            print("\n" + "=" * 56)
-            print("Tạo cuộc trò chuyện mới sau chương vừa xử lý.")
-            print("=" * 56 + "\n")
-            if not reset_chat_session(page, system_prompt):
-                print("[X] Lỗi khi tạo cuộc trò chuyện mới. Dừng script.")
-                break
-            wait_between_actions(seconds=4, note="Đảm bảo cuộc trò chuyện mới sẵn sàng")
+        print("\n" + "-" * 56)
+        print(f"Tạo cuộc trò chuyện mới sau chương '{filename}' của '{novel_name}'.")
+        print("-" * 56 + "\n")
 
-        print("\n================ HOÀN TẤT ==================")
-        print("Script đã xử lý xong. Bạn có thể đóng terminal này.")
+        if not reset_chat_session(page, system_prompt):
+            print(f"[X] '{novel_name}': lỗi khi tạo chat mới. Tạm dừng bộ truyện.")
+            break
+        wait_between_actions(seconds=4, note="Đợi chat mới ổn định")
+
+    print(f"\n[✓] Hoàn tất xử lý bộ truyện '{novel_name}'.")
+
+
+def main():
+    args = parse_arguments()
+    root_folder = os.path.abspath(args.root)
+    profile_paths = resolve_profile_paths(args)
+    system_prompt = load_system_prompt()
+
+    if not os.path.isdir(root_folder):
+        print(f"[X] Không tìm thấy thư mục gốc '{root_folder}'.")
+        return
+
+    novel_directories = iter_novel_directories(root_folder)
+    if not novel_directories:
+        print(f"[!] Không tìm thấy bộ truyện nào trong '{root_folder}'.")
+        return
+
+    print(f"[•] Tìm thấy {len(novel_directories)} bộ truyện trong '{root_folder}'.")
+
+    session_manager: Optional[BrowserSessionManager] = None
+    try:
+        with sync_playwright() as playwright:
+            session_manager = BrowserSessionManager(
+                playwright,
+                profile_paths,
+                headless=args.headless,
+            )
+            session_manager.launch_initial(system_prompt)
+
+            for novel_root in novel_directories:
+                process_novel(session_manager, novel_root, system_prompt)
+
+    except RateLimitError:
+        print("[X] Tool kết thúc do gặp giới hạn tần suất mà không thể xoay profile.")
+    except Error as exc:
+        print(f"[X] Lỗi Playwright: {exc}")
+    finally:
+        if session_manager is not None:
+            try:
+                session_manager.close()
+            except Exception:
+                pass
+
+    print("\n================ HOÀN TẤT ==================")
+    print("Bạn có thể đóng terminal này." )
 
 
 if __name__ == "__main__":

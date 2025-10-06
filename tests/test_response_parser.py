@@ -23,7 +23,7 @@ def test_parse_initialisation_response_success():
 
     [SECTION:RELATIONSHIPS]
     Nhân vật 1 (Tên dịch)=Trương Tam | Nhân vật 2 (Tên dịch)=Lý Tứ | Loại quan hệ=Bạn bè
-    Trương Tam | Lý Tứ | Bạn bè
+    Trương Tam | Lý Tứ | Đồng đội
         [END_SECTION]
 
         [END_DATA_BLOCK]
@@ -38,7 +38,6 @@ def test_parse_initialisation_response_success():
     assert glossary[1]["pinyin"] == "Lǐ Sì"
     assert glossary[1]["vietnamese_name"] == "Lý Tứ"
     assert relationships[0]["relationship_type"] == "Bạn bè"
-    assert relationships[1]["relationship_type"] == "Bạn bè"
 
 
 def test_parse_initialisation_response_missing_block():
@@ -70,7 +69,6 @@ def test_split_translation_and_updates():
     assert glossary_updates[0]["vietnamese_name"] == "Trương Tam"
     assert glossary_updates[1]["vietnamese_name"] == "Lý Tứ"
     assert relationship_updates[0]["relationship_type"] == "Anh em"
-    assert relationship_updates[1]["relationship_type"] == "Đồng đội"
 
 
 def test_split_translation_without_updates():

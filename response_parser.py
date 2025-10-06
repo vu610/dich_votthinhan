@@ -144,12 +144,26 @@ def parse_initialisation_response(text: str) -> Tuple[Dict[str, str], List[Dict[
     metadata = _parse_metadata_section(sections.get("METADATA", ""))
     glossary_lines = _clean_lines(sections.get("GLOSSARY", ""))
     glossary = [entry for line in glossary_lines if (entry := _parse_glossary_line(line))]
+    # Deduplicate glossary by original_name or vietnamese_name
+    seen_glossary = {}
+    for entry in glossary:
+        key = entry.get("original_name") or entry["vietnamese_name"]
+        if key not in seen_glossary:
+            seen_glossary[key] = entry
+    glossary = list(seen_glossary.values())
     relationships_lines = _clean_lines(sections.get("RELATIONSHIPS", ""))
     relationships = [
         entry
         for line in relationships_lines
         if (entry := _parse_relationship_line(line))
     ]
+    # Deduplicate relationships by (char1_vn_name, char2_vn_name) regardless of order
+    seen_relationships = {}
+    for entry in relationships:
+        key = tuple(sorted([entry["char1_vn_name"], entry["char2_vn_name"]]))
+        if key not in seen_relationships:
+            seen_relationships[key] = entry
+    relationships = list(seen_relationships.values())
     return metadata, glossary, relationships
 
 
@@ -171,11 +185,25 @@ def split_translation_and_updates(
         for line in _clean_lines(subsections.get("GLOSSARY_ADDITIONS", ""))
         if (entry := _parse_glossary_line(line))
     ]
+    # Deduplicate glossary by original_name or vietnamese_name
+    seen_glossary = {}
+    for entry in glossary_additions:
+        key = entry.get("original_name") or entry["vietnamese_name"]
+        if key not in seen_glossary:
+            seen_glossary[key] = entry
+    glossary_additions = list(seen_glossary.values())
     relationship_additions = [
         entry
         for line in _clean_lines(subsections.get("RELATIONSHIP_ADDITIONS", ""))
         if (entry := _parse_relationship_line(line))
     ]
+    # Deduplicate relationships by (char1_vn_name, char2_vn_name) regardless of order
+    seen_relationships = {}
+    for entry in relationship_additions:
+        key = tuple(sorted([entry["char1_vn_name"], entry["char2_vn_name"]]))
+        if key not in seen_relationships:
+            seen_relationships[key] = entry
+    relationship_additions = list(seen_relationships.values())
     return translation, glossary_additions, relationship_additions
 
 
