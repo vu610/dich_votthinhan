@@ -1,119 +1,495 @@
-# Dịch Truyện Tự Động – Kiến Trúc SQLite
+# Dịch Truyện Tự Động – Chinese to Vietnamese Novel Translation Tool
 
-Công cụ này tự động điều phối trình duyệt (thông qua Playwright) để gửi prompt cho Google AI Studio và dịch các chương truyện tiếng Trung sang tiếng Việt. Phiên bản hiện tại sử dụng cơ sở dữ liệu SQLite để lưu trữ ngữ cảnh, glossary và quan hệ giữa các nhân vật, giúp bản dịch ổn định và dễ mở rộng.
+[English](#english) | [Tiếng Việt](#tiếng-việt)
 
-## Luồng hoạt động
+---
 
-1. **Khởi tạo** – Với mỗi bộ truyện con nằm trong `truyen/<ten_truyen>/`, nếu thư mục `goc/` chưa có database `story_data.sqlite`, tool sẽ gửi 3 chương đầu tiên bằng *Initialization Prompt*. Phản hồi có cấu trúc được phân tích và ghi vào 3 bảng: `Metadata`, `Glossary`, `Relationships`.
-2. **Dịch chương** – Mỗi chương kế tiếp trong `goc/*.txt` được dịch bằng *Translation Prompt* chứa ngữ cảnh đã lọc (metadata, nhân vật và quan hệ liên quan). Bản dịch được lưu về `dich/*.txt` ngay trong thư mục bộ truyện tương ứng.
-3. **Cập nhật DB** – Nếu AI trả về khối `[DATABASE_UPDATES]`, script tự động thêm nhân vật/mối quan hệ vào SQLite để phục vụ các chương sau.
-4. **Dọn rác** – Mỗi lần khởi động, script tự động xoá các dòng placeholder (`N/A`) để prompt không bị nhiễu. Bạn cũng có thể gọi hàm `purge_placeholder_entries` khi cần.
+## English
 
-## Tool lấy truyện và đồng bộ chương (`cralw.py`)
+### Overview
 
-Script `cralw.py` đảm nhiệm việc tải toàn bộ chương từ uukanshu.cc, lưu vào cấu trúc thư mục chuẩn và theo dõi tiến độ bằng một database nhỏ (`novel_index.sqlite`).
+An automated translation tool that uses Google AI Studio to translate Chinese novels to Vietnamese with intelligent context management. The system maintains character glossaries, relationships, and story metadata using SQLite databases to ensure consistent, high-quality translations.
 
-### Tính năng chính
+### Key Features
 
-- Đọc danh sách URL (mỗi dòng một truyện) và tải toàn bộ chương về `truyen/<slug>/goc/chuong_XXX.txt`.
-- Ghi nhận thông tin truyện (tên, tác giả, url, bìa…) vào SQLite để tái sử dụng.
-- Mỗi lần chạy lại sẽ kiểm tra truyện đã lưu, đối chiếu mục lục và chỉ tải các chương mới.
-- Tự động bỏ qua chương đã tải nếu file tồn tại và có dữ liệu, đồng thời phát hiện file rỗng để tải lại.
-- Ghi `index.tsv` trong thư mục `goc/` để tiện tra cứu tên và url chương.
-- Có thể gọi `auto.py` sau khi tải chương mới để dịch ngay.
+- **Automated Web Scraping**: Downloads chapters from uukanshu.cc automatically
+- **Context-Aware Translation**: Maintains character names, relationships, and story context across chapters
+- **SQLite-Based Memory**: Stores glossaries and metadata for consistent translations
+- **Browser Automation**: Uses Playwright to interact with Google AI Studio
+- **Rate Limit Handling**: Automatically rotates between Chrome profiles when rate limits are hit
+- **Incremental Updates**: Checks for new chapters daily and translates them automatically
 
-### Cấu trúc database `novel_index.sqlite`
+### Architecture
 
-- `novels`: lưu thông tin cơ bản của truyện (slug, url, tác giả, đường dẫn thư mục, chương mới nhất…).
-- `chapters`: lưu từng chương đã tải (số thứ tự, url, đường dẫn file, hash nội dung) giúp phát hiện cập nhật.
+```
+truyen/                          # Root folder for all novels
+├── <novel_slug>/               # Individual novel folder
+│   ├── goc/                    # Original Chinese chapters
+│   │   ├── chuong_001.txt
+│   │   ├── chuong_002.txt
+│   │   └── ...
+│   ├── dich/                   # Translated Vietnamese chapters
+│   │   ├── chuong_001.txt
+│   │   └── ...
+│   └── story_data.sqlite       # Novel-specific database
+└── ...
 
-### Cách sử dụng
+novel_index.sqlite              # Global novel index database
+```
 
-Chuẩn bị file `input.txt` liệt kê URL mục lục truyện (mỗi dòng một url). Sau đó chạy:
+#### Database Schema
 
+**story_data.sqlite** (per novel):
+- `Metadata`: Story context, narrative perspective, pronouns
+- `Glossary`: Character names mapping (Chinese → Pinyin → Vietnamese)
+- `Relationships`: Character relationships and interactions
+
+**novel_index.sqlite** (global):
+- `novels`: Novel metadata, URLs, latest chapters
+- `chapters`: Chapter tracking with content hashes
+
+### Installation
+
+#### Prerequisites
+
+- Python 3.8+
+- Google Chrome browser
+- Active Google AI Studio account
+
+#### Setup
+
+1. **Clone the repository**:
+```bash
+git clone https://github.com/vu610/dich_votthinhan.git
+cd dich_votthinhan
+```
+
+2. **Install dependencies**:
+```bash
+pip install -r requirements.txt
+```
+
+3. **Install Playwright browsers**:
+```bash
+playwright install chromium
+```
+
+4. **Update requirements.txt** (recommended to add missing dependencies):
+```bash
+# Add these to requirements.txt if not already present:
+# beautifulsoup4>=4.12
+# lxml>=4.9
+# requests>=2.31
+```
+
+### Usage
+
+#### 1. Downloading Novels
+
+Create an `input.txt` file with novel URLs (one per line):
+```
+https://uukanshu.cc/book/17474/
+https://uukanshu.cc/book/25060/
+```
+
+Run the crawler:
 ```bash
 python cralw.py --input input.txt --run-auto
 ```
 
-Các tuỳ chọn hữu ích:
+**Options**:
+- `--root`: Root directory for novels (default: `./truyen`)
+- `--db`: Database file path (default: `novel_index.sqlite`)
+- `--min-length`: Minimum chapter length in characters (default: 400)
+- `--skip-registered`: Only process URLs from input file, skip registered novels
+- `--run-auto`: Automatically run translation after downloading new chapters
 
-- `--root`: thư mục gốc của các bộ truyện (mặc định `./truyen`).
-- `--db`: đường dẫn file SQLite lưu danh sách truyện (mặc định `novel_index.sqlite`).
-- `--min-length`: số ký tự tối thiểu của một chương hợp lệ (mặc định 400; tăng/giảm nếu trang nguồn thay đổi cấu trúc).
-- `--skip-registered`: chỉ xử lý các URL trong `--input`, bỏ qua bước quét lại các truyện đã có trong DB.
-- `--run-auto`: gọi `auto.py` ngay sau khi phát hiện chương mới.
+#### 2. Translating Chapters
 
-Bạn có thể thiết lập cron (hoặc systemd timer) chạy `python cralw.py --run-auto` hằng ngày. Script sẽ tự động kiểm tra toàn bộ truyện đã lưu trong database và chỉ tải những chương mới.
-
-## Cấu trúc cơ sở dữ liệu
-
-- `Metadata(key TEXT PRIMARY KEY, value TEXT)`
-- `Glossary(id INTEGER PK, original_name TEXT UNIQUE, pinyin TEXT, vietnamese_name TEXT, notes TEXT)`
-- `Relationships(id INTEGER PK, char1_vn_name TEXT, char2_vn_name TEXT, relationship_type TEXT, UNIQUE(char1_vn_name, char2_vn_name, relationship_type))`
-
-## Trước khi chạy
-
-1. Cài Playwright và browser tương ứng nếu chưa có: `pip install playwright` rồi `playwright install`.
-2. Đảm bảo máy có sẵn Google Chrome (tool sẽ tự khởi chạy mỗi profile riêng, không cần mở thủ công).
-3. Tổ chức thư mục gốc `truyen/` theo cấu trúc:
-
-	 ```
-	 truyen/
-		 bo_truyen_1/
-			 goc/   # chứa các file .txt gốc
-			 dich/  # tool sẽ tự tạo nếu thiếu
-			 story_data.sqlite
-		 bo_truyen_2/
-			 goc/
-			 dich/
-			 story_data.sqlite
-		 ...
-	 ```
-
-## Cách chạy script
-
-Chạy file `auto.py` trong môi trường đã cấu hình Playwright:
-
+**Manual translation**:
 ```bash
 python auto.py
 ```
 
-Các tùy chọn hữu ích:
-
+**With custom options**:
 ```bash
-python auto.py --root /duong-dan/truyen --profiles "~/chrome-for-automation1,~/chrome-for-automation2"
+python auto.py --root /path/to/truyen --profiles "~/chrome1,~/chrome2,~/chrome3"
 ```
 
-- `--root`: thư mục chứa các bộ truyện (mặc định `./truyen`).
-- `--profiles`: danh sách thư mục profile Chrome; tool sẽ xoay vòng khi gặp rate limit (mặc định 5 profile `~/chrome-for-automation1..5`).
-- `--headless`: nếu muốn chạy Chrome headless (không khuyến nghị vì khó debug giao diện).
+**Options**:
+- `--root`: Root directory containing novel folders (default: `./truyen`)
+- `--profiles`: Comma-separated list of Chrome profile paths for rotation
+- `--headless`: Run Chrome in headless mode (not recommended for debugging)
 
-Script sẽ tự động phát hiện chương đã dịch, tạo chat mới sau mỗi chương và chủ động đổi profile khi gặp rate limit.
+#### 3. Daily Automation
 
-## Kiểm thử
+Set up a cron job to check for new chapters daily:
 
-Thiết lập môi trường thử nghiệm (khuyến nghị venv) và chạy:
+```bash
+# Add to crontab (crontab -e)
+0 2 * * * cd /path/to/dich_votthinhan && python cralw.py --run-auto
+```
+
+### Translation Workflow
+
+1. **Initialization** (first 3 chapters):
+   - Analyzes story context, characters, and relationships
+   - Creates initial database with glossary entries
+   - Establishes narrative perspective and pronouns
+
+2. **Translation** (subsequent chapters):
+   - Loads relevant context from database
+   - Generates context-aware translation prompt
+   - Translates chapter maintaining consistency
+   - Updates database with new characters/relationships
+
+3. **Quality Assurance**:
+   - Detects and removes remaining Chinese characters
+   - Converts Chinese punctuation to Vietnamese equivalents
+   - Ensures stable AI responses before proceeding
+
+### Configuration
+
+#### System Prompt
+
+Create a `system_prompt.md` file to customize AI behavior:
+```markdown
+Bạn là một dịch giả văn học chuyên nghiệp, có khả năng dịch truyện Trung Việt với chất lượng cao.
+```
+
+#### Chrome Profiles
+
+By default, the tool uses 6 Chrome profiles (`~/chrome-for-automation0` to `~/chrome-for-automation5`). You can customize this:
+
+```python
+# In auto.py or via command line
+--profiles "~/profile1,~/profile2"
+```
+
+### Development
+
+#### Project Structure
+
+```
+.
+├── auto.py                 # Main translation automation script
+├── browser_utils.py        # Browser interaction utilities (NEW)
+├── config.py              # Configuration constants (NEW)
+├── cralw.py               # Web scraping for chapters
+├── context_builder.py     # Context extraction from database
+├── prompt_builder.py      # Prompt generation for AI
+├── response_parser.py     # Parse AI responses
+├── story_db.py           # Story database operations
+├── novel_db.py           # Novel index database operations
+├── epub_builder.py       # EPUB generation (optional)
+├── cleanup_db.py         # Database maintenance utilities
+└── tests/                # Test suite
+    ├── test_auto_helpers.py
+    ├── test_context_builder.py
+    ├── test_cralw_helpers.py
+    ├── test_prompt_builder.py
+    └── test_response_parser.py
+```
+
+#### Running Tests
 
 ```bash
 python -m pytest
 ```
 
-Các bài test tập trung vào bộ phân tích phản hồi (`response_parser`) và logic lọc ngữ cảnh (`context_builder`).
+#### Code Quality
 
-## Tùy biến
+The codebase has been refactored for better maintainability:
+- Separated configuration into `config.py`
+- Extracted browser utilities into `browser_utils.py`
+- Added comprehensive docstrings
+- Improved type hints
+- Better error handling
 
-- **Prompts**: cập nhật trong `prompt_builder.py` nếu cần thay đổi định dạng.
-- **System instructions**: chỉnh trong `system_prompt.md` (hiện rất tối giản, nhường quyền điều khiển cho prompt động).
-- **Glossary xuất ra Markdown**: nếu cần file tổng hợp phục vụ ngoại vi, hãy bổ sung bước xuất từ SQLite sang `character_glossary.md`.
-- **Làm sạch dữ liệu cũ**: nếu muốn tự dọn dẹp, bạn có thể chạy nhanh đoạn mã sau:
+### Troubleshooting
 
-	```python
-	from story_db import connect, purge_placeholder_entries
+#### Common Issues
 
-	with connect("truyen/bo_truyen_1/story_data.sqlite") as conn:
-		removed = purge_placeholder_entries(conn)
-		print("Đã xoá", removed)
-	```
+**1. "Content blocked" errors**:
+- Modify your system prompt to be less explicit
+- Try different phrasing in prompts
+- Use a different Chrome profile
+
+**2. Rate limits**:
+- Tool automatically rotates profiles
+- Ensure you have multiple Chrome profiles configured
+- Wait time between requests is built-in
+
+**3. Missing translations**:
+- Check if initialization completed successfully
+- Verify database exists in novel folder
+- Review logs for parse errors
+
+**4. Chinese characters remain in translation**:
+- The tool attempts automatic cleanup
+- May need to adjust `MAX_CHINESE_FIX_ROUNDS` in config
+
+### Contributing
+
+Contributions are welcome! Please:
+1. Fork the repository
+2. Create a feature branch
+3. Add tests for new functionality
+4. Ensure all tests pass
+5. Submit a pull request
+
+### License
+
+This project is provided as-is for educational purposes.
+
+### Acknowledgments
+
+- Uses Google AI Studio for translation
+- Web scraping from uukanshu.cc
+- Built with Playwright for browser automation
 
 ---
-Để mở rộng thêm (ví dụ: hỗ trợ nhiều truyện cùng lúc, sinh báo cáo thay đổi), hãy tạo thêm module mới và dựa vào lớp `story_db` sẵn có để đọc/ghi SQLite an toàn.
+
+## Tiếng Việt
+
+### Tổng Quan
+
+Công cụ dịch truyện tự động sử dụng Google AI Studio để dịch tiểu thuyết Trung Quốc sang tiếng Việt với quản lý ngữ cảnh thông minh. Hệ thống duy trì bảng thuật ngữ nhân vật, mối quan hệ và metadata truyện bằng cơ sở dữ liệu SQLite để đảm bảo bản dịch nhất quán và chất lượng cao.
+
+### Tính Năng Chính
+
+- **Thu Thập Web Tự Động**: Tải chương từ uukanshu.cc tự động
+- **Dịch Thuật Nhận Biết Ngữ Cảnh**: Duy trì tên nhân vật, quan hệ và ngữ cảnh truyện qua các chương
+- **Bộ Nhớ SQLite**: Lưu trữ bảng thuật ngữ và metadata cho bản dịch nhất quán
+- **Tự Động Hóa Trình Duyệt**: Sử dụng Playwright tương tác với Google AI Studio
+- **Xử Lý Giới Hạn Tần Suất**: Tự động xoay vòng giữa các profile Chrome khi gặp giới hạn
+- **Cập Nhật Tăng Dần**: Kiểm tra chương mới hằng ngày và dịch tự động
+
+### Kiến Trúc
+
+```
+truyen/                          # Thư mục gốc cho tất cả truyện
+├── <ten_truyen>/               # Thư mục truyện riêng
+│   ├── goc/                    # Chương gốc tiếng Trung
+│   │   ├── chuong_001.txt
+│   │   ├── chuong_002.txt
+│   │   └── ...
+│   ├── dich/                   # Chương đã dịch tiếng Việt
+│   │   ├── chuong_001.txt
+│   │   └── ...
+│   └── story_data.sqlite       # Database riêng cho truyện
+└── ...
+
+novel_index.sqlite              # Database chỉ mục truyện toàn cục
+```
+
+#### Cấu Trúc Database
+
+**story_data.sqlite** (mỗi truyện):
+- `Metadata`: Ngữ cảnh truyện, góc nhìn tường thuật, đại từ
+- `Glossary`: Ánh xạ tên nhân vật (Trung → Pinyin → Việt)
+- `Relationships`: Mối quan hệ và tương tác nhân vật
+
+**novel_index.sqlite** (toàn cục):
+- `novels`: Metadata truyện, URL, chương mới nhất
+- `chapters`: Theo dõi chương với content hash
+
+### Cài Đặt
+
+#### Yêu Cầu
+
+- Python 3.8+
+- Trình duyệt Google Chrome
+- Tài khoản Google AI Studio đang hoạt động
+
+#### Thiết Lập
+
+1. **Clone repository**:
+```bash
+git clone https://github.com/vu610/dich_votthinhan.git
+cd dich_votthinhan
+```
+
+2. **Cài dependencies**:
+```bash
+pip install -r requirements.txt
+```
+
+3. **Cài trình duyệt Playwright**:
+```bash
+playwright install chromium
+```
+
+4. **Cập nhật requirements.txt** (khuyến nghị thêm các dependency còn thiếu):
+```bash
+# Thêm vào requirements.txt nếu chưa có:
+# beautifulsoup4>=4.12
+# lxml>=4.9
+# requests>=2.31
+```
+
+### Sử Dụng
+
+#### 1. Tải Truyện
+
+Tạo file `input.txt` với URL truyện (mỗi dòng một URL):
+```
+https://uukanshu.cc/book/17474/
+https://uukanshu.cc/book/25060/
+```
+
+Chạy crawler:
+```bash
+python cralw.py --input input.txt --run-auto
+```
+
+**Tùy chọn**:
+- `--root`: Thư mục gốc cho truyện (mặc định: `./truyen`)
+- `--db`: Đường dẫn file database (mặc định: `novel_index.sqlite`)
+- `--min-length`: Độ dài tối thiểu chương (mặc định: 400 ký tự)
+- `--skip-registered`: Chỉ xử lý URL từ file input, bỏ qua truyện đã đăng ký
+- `--run-auto`: Tự động chạy dịch sau khi tải chương mới
+
+#### 2. Dịch Chương
+
+**Dịch thủ công**:
+```bash
+python auto.py
+```
+
+**Với tùy chọn tùy chỉnh**:
+```bash
+python auto.py --root /duong-dan/truyen --profiles "~/chrome1,~/chrome2,~/chrome3"
+```
+
+**Tùy chọn**:
+- `--root`: Thư mục gốc chứa thư mục truyện (mặc định: `./truyen`)
+- `--profiles`: Danh sách các đường dẫn profile Chrome, phân cách bằng dấu phẩy
+- `--headless`: Chạy Chrome ở chế độ headless (không khuyến nghị cho debug)
+
+#### 3. Tự Động Hóa Hằng Ngày
+
+Thiết lập cron job để kiểm tra chương mới mỗi ngày:
+
+```bash
+# Thêm vào crontab (crontab -e)
+0 2 * * * cd /path/to/dich_votthinhan && python cralw.py --run-auto
+```
+
+### Quy Trình Dịch
+
+1. **Khởi tạo** (3 chương đầu):
+   - Phân tích ngữ cảnh truyện, nhân vật và quan hệ
+   - Tạo database ban đầu với các mục glossary
+   - Xác định góc nhìn tường thuật và đại từ
+
+2. **Dịch thuật** (các chương tiếp theo):
+   - Tải ngữ cảnh liên quan từ database
+   - Tạo prompt dịch nhận biết ngữ cảnh
+   - Dịch chương duy trì tính nhất quán
+   - Cập nhật database với nhân vật/quan hệ mới
+
+3. **Đảm Bảo Chất Lượng**:
+   - Phát hiện và loại bỏ ký tự tiếng Trung còn sót
+   - Chuyển dấu câu tiếng Trung sang tiếng Việt
+   - Đảm bảo phản hồi AI ổn định trước khi tiếp tục
+
+### Cấu Hình
+
+#### System Prompt
+
+Tạo file `system_prompt.md` để tùy chỉnh hành vi AI:
+```markdown
+Bạn là một dịch giả văn học chuyên nghiệp, có khả năng dịch truyện Trung Việt với chất lượng cao.
+```
+
+#### Chrome Profiles
+
+Mặc định, công cụ sử dụng 6 profile Chrome (`~/chrome-for-automation0` đến `~/chrome-for-automation5`). Bạn có thể tùy chỉnh:
+
+```python
+# Trong auto.py hoặc qua command line
+--profiles "~/profile1,~/profile2"
+```
+
+### Phát Triển
+
+#### Cấu Trúc Dự Án
+
+```
+.
+├── auto.py                 # Script tự động hóa dịch thuật chính
+├── browser_utils.py        # Tiện ích tương tác trình duyệt (MỚI)
+├── config.py              # Hằng số cấu hình (MỚI)
+├── cralw.py               # Web scraping cho chương
+├── context_builder.py     # Trích xuất ngữ cảnh từ database
+├── prompt_builder.py      # Tạo prompt cho AI
+├── response_parser.py     # Phân tích phản hồi AI
+├── story_db.py           # Thao tác database truyện
+├── novel_db.py           # Thao tác database chỉ mục truyện
+├── epub_builder.py       # Tạo EPUB (tùy chọn)
+├── cleanup_db.py         # Tiện ích bảo trì database
+└── tests/                # Bộ test
+    ├── test_auto_helpers.py
+    ├── test_context_builder.py
+    ├── test_cralw_helpers.py
+    ├── test_prompt_builder.py
+    └── test_response_parser.py
+```
+
+#### Chạy Tests
+
+```bash
+python -m pytest
+```
+
+#### Chất Lượng Code
+
+Codebase đã được refactor để dễ bảo trì hơn:
+- Tách cấu hình vào `config.py`
+- Trích xuất tiện ích trình duyệt vào `browser_utils.py`
+- Thêm docstring toàn diện
+- Cải thiện type hints
+- Xử lý lỗi tốt hơn
+
+### Xử Lý Sự Cố
+
+#### Vấn Đề Thường Gặp
+
+**1. Lỗi "Content blocked"**:
+- Chỉnh sửa system prompt của bạn để ít rõ ràng hơn
+- Thử cách diễn đạt khác trong prompt
+- Sử dụng profile Chrome khác
+
+**2. Giới hạn tần suất**:
+- Công cụ tự động xoay vòng profile
+- Đảm bảo bạn có nhiều profile Chrome đã cấu hình
+- Thời gian chờ giữa các request đã được tích hợp sẵn
+
+**3. Bản dịch bị thiếu**:
+- Kiểm tra xem khởi tạo đã hoàn tất thành công chưa
+- Xác minh database tồn tại trong thư mục truyện
+- Xem lại log để tìm lỗi parse
+
+**4. Ký tự tiếng Trung còn sót trong bản dịch**:
+- Công cụ thử tự động dọn dẹp
+- Có thể cần điều chỉnh `MAX_CHINESE_FIX_ROUNDS` trong config
+
+### Đóng Góp
+
+Chào đón đóng góp! Vui lòng:
+1. Fork repository
+2. Tạo branch tính năng
+3. Thêm test cho chức năng mới
+4. Đảm bảo tất cả test pass
+5. Gửi pull request
+
+### Giấy Phép
+
+Dự án này được cung cấp as-is cho mục đích giáo dục.
+
+### Lời Cảm Ơn
+
+- Sử dụng Google AI Studio cho dịch thuật
+- Web scraping từ uukanshu.cc
+- Xây dựng với Playwright cho tự động hóa trình duyệt
