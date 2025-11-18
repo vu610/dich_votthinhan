@@ -1,5 +1,9 @@
-# File: dich_truyen_final_v18.py
-# Phiên b?n s?a l?i logic c?p nh?t glossary, ??m b?o ??ng b? hóa nh?t quán.
+"""
+Automated translation tool for Chinese novels to Vietnamese.
+
+This module handles browser automation, prompt generation, and translation
+workflow management using Google AI Studio.
+"""
 
 import argparse
 import os
@@ -9,9 +13,40 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from playwright.sync_api import Error, TimeoutError, sync_playwright
 
+from browser_utils import (
+    load_system_prompt,
+    safe_click,
+    safe_fill,
+    update_system_instructions,
+    wait_between_actions,
+)
+from config import (
+    CONTENT_BLOCKED_SELECTOR,
+    DB_FILENAME,
+    DEFAULT_PROFILE_PATHS,
+    DEFAULT_ROOT_FOLDER,
+    MAX_CHINESE_FIX_ROUNDS,
+    MAX_RETRIES,
+    NEW_CHAT_BUTTON_SELECTOR,
+    PUNCTUATION_MAP,
+    RATE_LIMIT_KEYWORDS,
+    RESPONSE_CONTENT_SELECTOR,
+    RESPONSE_TURN_SELECTOR,
+    SEND_BUTTON_SELECTOR,
+    STABILITY_CHECK_INTERVAL,
+    STABILITY_CHECKS_REQUIRED,
+    STABILITY_TIMEOUT,
+    STOP_BUTTON_SELECTOR,
+    TEXT_INPUT_SELECTOR,
+    WEBSITE_URL,
+)
 from context_builder import build_context_sections
 from prompt_builder import build_initialisation_prompt, build_translation_prompt
-from response_parser import ParseError, parse_initialisation_response, split_translation_and_updates
+from response_parser import (
+    ParseError,
+    parse_initialisation_response,
+    split_translation_and_updates,
+)
 from story_db import (
     connect,
     initialise_database,
@@ -21,44 +56,20 @@ from story_db import (
     write_metadata,
 )
 
-# ======================= CONFIG =======================
-DEFAULT_ROOT_FOLDER = "truyen"
-SYSTEM_PROMPT_FILE = "system_prompt.md"
-WEBSITE_URL = "https://aistudio.google.com/prompts/new_chat"
-TEXT_INPUT_SELECTOR = 'textarea[aria-label="Type something or tab to choose an example prompt"], textarea[aria-label="Start typing a prompt"]'
-RESPONSE_TURN_SELECTOR = "ms-chat-turn"
-RESPONSE_CONTENT_SELECTOR = "ms-text-chunk"
-SEND_BUTTON_SELECTOR = ".run-button"
-NEW_CHAT_BUTTON_SELECTOR = "button[aria-label='New chat']"
-STOP_BUTTON_SELECTOR = "button:has-text('Stop')"
-CONTENT_BLOCKED_SELECTOR = 'button:has-text("Content blocked")'
-SYSTEM_INSTRUCTIONS_BUTTON_SELECTOR = "button[aria-label='System instructions']"
-SYSTEM_INSTRUCTIONS_TEXTAREA_SELECTOR = 'textarea[placeholder*="Optional tone and style instructions"]'
-MAX_RETRIES = 3
-STABILITY_CHECKS_REQUIRED = 3
-STABILITY_CHECK_INTERVAL = 1
-STABILITY_TIMEOUT = 30
-ACTION_DELAY_SECONDS = 2
-DB_FILENAME = "story_data.sqlite"
-# ======================================================
 
-DEFAULT_PROFILE_PATHS = [
-    os.path.expanduser(f"~/chrome-for-automation{idx}") for idx in range(0, 6)
-]
 
-RATE_LIMIT_KEYWORDS = (
-    "you've reached your rate limit",
-    "you have reached your rate limit",
-    "rate limit",
+# Chinese text detection pattern
+CHINESE_SEQUENCE_PATTERN = re.compile(
+    r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002EBEF]+"
 )
 
 
 class RateLimitError(RuntimeError):
-    """Được ném ra khi AI Studio báo đã chạm giới hạn tần suất."""
+    """Raised when AI Studio reports rate limit has been reached."""
 
 
 class BrowserSessionManager:
-    """Quản lý vòng quay profile Chrome khi làm việc với Playwright."""
+    """Manages Chrome profile rotation when working with Playwright."""
 
     def __init__(
         self,
@@ -68,6 +79,15 @@ class BrowserSessionManager:
         channel: str = "chrome",
         headless: bool = False,
     ) -> None:
+        """
+        Initialize the browser session manager.
+
+        Args:
+            playwright: Playwright instance
+            profile_paths: List of Chrome profile directory paths
+            channel: Browser channel to use (default: "chrome")
+            headless: Whether to run browser in headless mode
+        """
         if not profile_paths:
             raise ValueError("Cần ít nhất một profile Chrome để chạy tool.")
         self._playwright = playwright
@@ -79,24 +99,26 @@ class BrowserSessionManager:
         self.page = None
 
     def launch_initial(self, system_prompt: Optional[str]) -> None:
+        """Launch browser with the first profile."""
         self._rotate_to(self._next_index(), system_prompt)
 
     def rotate(self, system_prompt: Optional[str]) -> None:
+        """Rotate to the next Chrome profile."""
         print("\n[!] Phát hiện giới hạn tần suất. Đang chuyển sang profile Chrome kế tiếp...")
         self._rotate_to(self._next_index(), system_prompt)
 
     def close(self) -> None:
+        """Close the current browser context."""
         if self._context is not None:
             try:
                 self._context.close()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 print(f"[!] Cảnh báo: lỗi khi đóng context trình duyệt: {exc}")
         self._context = None
         self.page = None
 
-    # --------------------------------------------------
-
     def _next_index(self) -> int:
+        """Get the next profile index in rotation."""
         return (self._index + 1) % len(self._profile_paths)
 
     def _rotate_to(self, index: int, system_prompt: Optional[str]) -> None:
@@ -170,113 +192,18 @@ PUNCTUATION_MAP: Dict[str, str] = {
     "－": "-",
 }
 
-MAX_CHINESE_FIX_ROUNDS = 3
-
-
-def wait_between_actions(seconds=ACTION_DELAY_SECONDS, note: Optional[str] = None, indent: str = "    "):
-    try:
-        delay = float(seconds)
-    except (TypeError, ValueError):
-        delay = ACTION_DELAY_SECONDS
-    if delay < 0:
-        delay = ACTION_DELAY_SECONDS
-    if note:
-        print(f"{indent}- {note} (chờ {delay:.1f}s)...")
-    time.sleep(delay)
-
-
-def safe_click(locator, description: str = "nút", max_attempts: int = 3) -> bool:
-    for attempt in range(1, max_attempts + 1):
-        try:
-            locator.wait_for(state="visible", timeout=10000)
-            locator.scroll_into_view_if_needed(timeout=5000)
-            wait_between_actions(note=f"Chuẩn bị click {description}")
-            locator.click(timeout=10000)
-            wait_between_actions(note=f"Hoàn tất click {description}")
-            return True
-        except Exception as exc:  # noqa: BLE001
-            print(f"    - Cảnh báo: Click {description} thất bại (lần {attempt}/{max_attempts}). Lỗi: {exc}")
-            wait_between_actions(note="Tạm nghỉ trước khi thử lại")
-            try:
-                locator.click(timeout=10000, force=True)
-                wait_between_actions(note=f"Hoàn tất click force {description}")
-                return True
-            except Exception as force_error:  # noqa: BLE001
-                print(f"      -> Thử click force thất bại: {force_error}")
-            try:
-                locator.dispatch_event("click")
-                wait_between_actions(note=f"Hoàn tất dispatch click {description}")
-                return True
-            except Exception as dispatch_error:  # noqa: BLE001
-                print(f"      -> Thử dispatch click thất bại: {dispatch_error}")
-            try:
-                locator.page.keyboard.press("Escape")
-            except Exception:  # noqa: BLE001
-                pass
-            wait_between_actions(note="Giải phóng các hộp thoại che khuất")
-            if attempt == max_attempts:
-                print(f"    - [X] Không thể click {description} sau {max_attempts} lần thử.")
-                return False
-    return False
-
-
-def safe_fill(locator, text: str, description: str = "ô nhập", max_attempts: int = 3) -> bool:
-    for attempt in range(1, max_attempts + 1):
-        try:
-            locator.wait_for(state="visible", timeout=10000)
-            locator.scroll_into_view_if_needed(timeout=5000)
-            wait_between_actions(note=f"Chuẩn bị điền {description}")
-            locator.fill(text)
-            wait_between_actions(note=f"Hoàn tất điền {description}")
-            return True
-        except Exception as exc:  # noqa: BLE001
-            print(f"    - Cảnh báo: Không điền được {description} (lần {attempt}/{max_attempts}). Lỗi: {exc}")
-            wait_between_actions(note="Tạm nghỉ trước khi thử lại")
-            try:
-                locator.clear()
-            except Exception:  # noqa: BLE001
-                pass
-            if attempt == max_attempts:
-                print(f"    - [X] Bỏ qua thao tác điền {description}.")
-                return False
-    return False
-
-
-def load_system_prompt() -> Optional[str]:
-    if not os.path.exists(SYSTEM_PROMPT_FILE):
-        return None
-    try:
-        with open(SYSTEM_PROMPT_FILE, "r", encoding="utf-8") as handle:
-            return handle.read().strip()
-    except Exception as exc:  # noqa: BLE001
-        print(f"[!] Cảnh báo: Không đọc được system prompt ({exc}).")
-        return None
-
-
-def update_system_instructions(page, instructions: Optional[str]) -> None:
-    if not instructions:
-        return
-    print("    - Đang đồng bộ System Instructions trên web...")
-    try:
-        button = page.locator(SYSTEM_INSTRUCTIONS_BUTTON_SELECTOR)
-        if not safe_click(button, "nút System Instructions"):
-            print("    - Bỏ qua update System Instructions vì không thao tác được.")
-            return
-        textarea = page.locator(SYSTEM_INSTRUCTIONS_TEXTAREA_SELECTOR)
-        textarea.wait_for(timeout=10000)
-        if not safe_fill(textarea, instructions, "System Instructions"):
-            return
-        page.keyboard.press("Escape")
-        wait_between_actions(note="Đóng hộp System Instructions")
-        print("    - Đồng bộ hóa thành công.")
-        wait_between_actions(seconds=3, note="Đảm bảo System Instructions đóng lại")
-    except Exception as exc:  # noqa: BLE001
-        print(f"    - Lỗi khi đồng bộ hóa System Instructions. Bỏ qua. Lỗi: {exc}")
-        page.keyboard.press("Escape")
-        wait_between_actions(note="Thoát khỏi System Instructions sau lỗi")
 
 
 def wait_for_and_get_stable_text(page) -> Optional[str]:
+    """
+    Wait for AI response to stabilize and return the content.
+    
+    Args:
+        page: Playwright page object
+        
+    Returns:
+        Stabilized response text or None if unable to get it
+    """
     print("    - Bắt đầu quan sát nội dung phản hồi cho đến khi ổn định...")
     all_turns = page.locator(RESPONSE_TURN_SELECTOR).all()
     if not all_turns:
